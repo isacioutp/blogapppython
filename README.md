@@ -1,6 +1,6 @@
 # Blog Médico (Demo) — Flask “Vintage” + Docker
 Demo estilo 2014–2016: server-rendered con Flask, SQLite, templates, RSS y panel admin clásico.
-
+demotest
 ## Features (vintage)
 - Tags (many-to-many) y vista por tag: `/tag/<name>`
 - Búsqueda simple (SQL LIKE): `/search?q=...` (con paginación)
