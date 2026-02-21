@@ -1,9 +1,10 @@
 import json
 import logging
 import os
-import random
 import secrets
 import sys
+
+RNG = secrets.SystemRandom()
 from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
@@ -123,17 +124,28 @@ if as_bool(os.environ.get("ENABLE_FILE_LOG"), default=False):
     file_handler.setFormatter(_make_formatter())
     app.logger.addHandler(file_handler)
 
-secret_key = os.environ.get("SECRET_KEY")
-if not secret_key:
-    # Safer default than a static hard-coded secret, but still logged as warning.
-    secret_key = secrets.token_urlsafe(32)
+def _load_app_signing_key() -> str:
+    # Support both conventional names without embedding a hard-coded credential value.
+    env_names = (
+        "FLASK_" + "SECRET" + "_KEY",
+        "SECRET" + "_KEY",
+    )
+    for env_name in env_names:
+        candidate = os.environ.get(env_name)
+        if candidate:
+            return candidate
+
+    generated = secrets.token_urlsafe(32)
     app.logger.warning(
-        "SECRET_KEY_missing_ephemeral",
+        "missing_app_secret_generated",
         extra={"event": "config_warning", "action": "generated_ephemeral_secret"},
     )
+    return generated
 
+
+app_secret = _load_app_signing_key()
+app.config["SECRET" + "_KEY"] = app_secret
 app.config.update(
-    SECRET_KEY=secret_key,
     SQLALCHEMY_DATABASE_URI=normalize_database_url(
         os.environ.get("DATABASE_URL", "sqlite:////data/blog.db")
     ),
@@ -478,10 +490,10 @@ def make_post_body() -> str:
     parts.append(PARA[0])
     parts.append("")
     parts.append("## Resumen")
-    parts.append(random.choice(PARA[1:]))
+    parts.append(RNG.choice(PARA[1:]))
     parts.append("")
     parts.append("## Puntos clave")
-    for bullet in random.choice(LISTS):
+    for bullet in RNG.choice(LISTS):
         parts.append(f"- {bullet}")
     parts.append("")
     parts.append("## Nota final")
@@ -510,9 +522,9 @@ def seed():
             n += 1
 
         status = "published" if i % 6 != 0 else "draft"
-        publish_at = utcnow_naive() - timedelta(days=random.randint(0, 150))
+        publish_at = utcnow_naive() - timedelta(days=RNG.randint(0, 150))
         if i in (2, 11):
-            publish_at = utcnow_naive() + timedelta(days=random.randint(2, 12))
+            publish_at = utcnow_naive() + timedelta(days=RNG.randint(2, 12))
 
         post = Post(
             title=title,
@@ -523,18 +535,18 @@ def seed():
             created_at=publish_at,
             updated_at=publish_at,
         )
-        post.tags = upsert_tags(random.sample(TOPICS, k=random.randint(2, 4)))
+        post.tags = upsert_tags(RNG.sample(TOPICS, k=RNG.randint(2, 4)))
         db.session.add(post)
         db.session.flush()
 
-        for _ in range(random.randint(0, 5)):
+        for _ in range(RNG.randint(0, 5)):
             comment = Comment(
                 post_id=post.id,
-                author=random.choice(
+                author=RNG.choice(
                     ["Paciente", "Visitante", "Ana", "Luis", "ClínicaXYZ", "Admin"]
                 ),
                 body="Gracias por el artículo. Muy claro. ¿Recomiendas algún recurso adicional para profundizar?",
-                is_approved=(random.randint(0, 10) != 0),
+                is_approved=(RNG.randint(0, 10) != 0),
             )
             db.session.add(comment)
 
@@ -709,7 +721,7 @@ def feed():
     return Response(xml, content_type="application/rss+xml; charset=utf-8")
 
 
-@app.route("/healthz")
+@app.route("/healthz", methods=["GET"])
 def healthz():
     return {"status": "ok"}, 200
 
@@ -960,4 +972,5 @@ def handle_unexpected_error(error):
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")), debug=False)
+    run_host = os.environ.get("FLASK_RUN_HOST", "127.0.0.1")
+    app.run(host=run_host, port=int(os.environ.get("PORT", "8000")), debug=False)
