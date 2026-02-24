@@ -4,16 +4,18 @@ services:
     ports:
       - "8000:8000"
     environment:
-      SECRET_KEY: "${SECRET_KEY:-change-this-in-real-life}"
-      ADMIN_PASSWORD: "${ADMIN_PASSWORD:-admin123}"
-      DATABASE_URL: "${DATABASE_URL:-sqlite:////data/blog.db}"
-      FLASK_APP: "${FLASK_APP:-app.py}"
-      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
-      LOG_FORMAT: "${LOG_FORMAT:-json}"
-      ENABLE_FILE_LOG: "${ENABLE_FILE_LOG:-true}"
-      AUTO_INIT_DB: "${AUTO_INIT_DB:-true}"
-      AUTO_SEED_DB: "${AUTO_SEED_DB:-true}"
-      SESSION_COOKIE_SECURE: "${SESSION_COOKIE_SECURE:-false}"
+      SECRET_KEY: "${SECRET_KEY:?set SECRET_KEY in environment or .env}"
+      ADMIN_PASSWORD: "${ADMIN_PASSWORD:?set ADMIN_PASSWORD in environment or .env}"
+      DATABASE_URL: "sqlite:////data/blog.db"
+      FLASK_APP: "app.py"
+      SESSION_COOKIE_SECURE: "true"
+      TRUSTED_HOSTS: "localhost,127.0.0.1"
+      LOGIN_RATE_LIMIT_WINDOW_SECONDS: "900"
+      LOGIN_RATE_LIMIT_MAX_ATTEMPTS: "5"
+      LOG_LEVEL: "INFO"
+      LOG_FORMAT: "json"
+      ENABLE_FILE_LOG: "true"
+      ENABLE_DEMO_SEED: "false"
     volumes:
       - blogdata:/data
     restart: unless-stopped
