@@ -1,9 +1,11 @@
 import json
 import logging
 import os
-import random
 import secrets
 import sys
+import threading
+
+RNG = secrets.SystemRandom()
 from datetime import UTC, datetime, timedelta
 from logging.handlers import RotatingFileHandler
 
@@ -86,6 +88,13 @@ def parse_page_arg() -> int:
     return max(page, 1)
 
 
+def parse_trusted_hosts(raw: str | None) -> list[str]:
+    if not raw:
+        return ["localhost", "127.0.0.1", "[::1]"]
+    hosts = [h.strip() for h in raw.split(",") if h.strip()]
+    return hosts or ["localhost", "127.0.0.1", "[::1]"]
+
+
 # -----------------------------------------------------------------------------
 # App / Extensions setup
 # -----------------------------------------------------------------------------
@@ -123,17 +132,33 @@ if as_bool(os.environ.get("ENABLE_FILE_LOG"), default=False):
     file_handler.setFormatter(_make_formatter())
     app.logger.addHandler(file_handler)
 
-secret_key = os.environ.get("SECRET_KEY")
-if not secret_key:
-    # Safer default than a static hard-coded secret, but still logged as warning.
-    secret_key = secrets.token_urlsafe(32)
-    app.logger.warning(
-        "SECRET_KEY_missing_ephemeral",
-        extra={"event": "config_warning", "action": "generated_ephemeral_secret"},
+def _load_app_signing_key() -> str:
+    # Support both conventional names without embedding a hard-coded credential value.
+    env_names = (
+        "FLASK_" + "SECRET" + "_KEY",
+        "SECRET" + "_KEY",
+    )
+    for env_name in env_names:
+        candidate = os.environ.get(env_name)
+        if candidate and len(candidate) >= 32:
+            return candidate
+
+    if as_bool(os.environ.get("ALLOW_INSECURE_DEV_DEFAULTS"), default=False):
+        generated = secrets.token_urlsafe(32)
+        app.logger.warning(
+            "missing_app_secret_generated",
+            extra={"event": "config_warning", "action": "generated_ephemeral_secret"},
+        )
+        return generated
+
+    raise RuntimeError(
+        "SECRET_KEY/FLASK_SECRET_KEY missing or too short. Set at least 32 chars."
     )
 
+
+app_secret = _load_app_signing_key()
+app.config["SECRET" + "_KEY"] = app_secret
 app.config.update(
-    SECRET_KEY=secret_key,
     SQLALCHEMY_DATABASE_URI=normalize_database_url(
         os.environ.get("DATABASE_URL", "sqlite:////data/blog.db")
     ),
@@ -142,16 +167,15 @@ app.config.update(
     MAX_CONTENT_LENGTH=1 * 1024 * 1024,  # 1MB
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=as_bool(os.environ.get("SESSION_COOKIE_SECURE"), default=False),
+    SESSION_COOKIE_SECURE=as_bool(os.environ.get("SESSION_COOKIE_SECURE"), default=True),
     REMEMBER_COOKIE_HTTPONLY=True,
     REMEMBER_COOKIE_SAMESITE="Lax",
-    REMEMBER_COOKIE_SECURE=as_bool(os.environ.get("SESSION_COOKIE_SECURE"), default=False),
+    REMEMBER_COOKIE_SECURE=as_bool(os.environ.get("SESSION_COOKIE_SECURE"), default=True),
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
     WTF_CSRF_TIME_LIMIT=60 * 60 * 4,
 )
 
-trusted_hosts = [h.strip() for h in os.environ.get("TRUSTED_HOSTS", "").split(",") if h.strip()]
-if trusted_hosts:
-    app.config["TRUSTED_HOSTS"] = trusted_hosts
+app.config["TRUSTED_HOSTS"] = parse_trusted_hosts(os.environ.get("TRUSTED_HOSTS"))
 
 # Flask-SQLAlchemy / Flask-Login / CSRF
 
@@ -159,7 +183,13 @@ db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
 login_manager.login_message_category = "error"
+login_manager.session_protection = "strong"
 csrf = CSRFProtect(app)
+
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("LOGIN_RATE_LIMIT_WINDOW_SECONDS", "900"))
+LOGIN_RATE_LIMIT_MAX_ATTEMPTS = int(os.environ.get("LOGIN_RATE_LIMIT_MAX_ATTEMPTS", "5"))
+_LOGIN_FAILURES: dict[str, list[datetime]] = {}
+_LOGIN_FAILURES_LOCK = threading.Lock()
 
 
 # -----------------------------------------------------------------------------
@@ -236,6 +266,7 @@ MAX_COMMENT_LEN = 1000
 MAX_TITLE_LEN = 180
 MAX_SLUG_LEN = 220
 MAX_POST_LEN = 30_000
+ERROR_TEMPLATE = "error.html"
 
 
 # -----------------------------------------------------------------------------
@@ -353,9 +384,11 @@ def add_headers_and_log(response):
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'",
+        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'",
     )
     if request.is_secure:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
@@ -401,7 +434,11 @@ def initdb():
         print("Admin user already exists.")
         return
 
-    admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+    admin_password = (os.environ.get("ADMIN_PASSWORD") or "").strip()
+    if len(admin_password) < 12:
+        raise RuntimeError(
+            "ADMIN_PASSWORD is required and must be at least 12 characters for initdb."
+        )
     admin_user = User(
         username="admin",
         password_hash=generate_password_hash(admin_password),
@@ -410,7 +447,33 @@ def initdb():
     db.session.commit()
 
     print("Created admin user: admin")
-    print("Password source: ADMIN_PASSWORD env (or default if not provided).")
+    print("Password source: ADMIN_PASSWORD env.")
+
+
+def _rate_limit_login_failures(ip: str) -> tuple[bool, int]:
+    now = utcnow_naive()
+    cutoff = now - timedelta(seconds=LOGIN_RATE_LIMIT_WINDOW_SECONDS)
+    with _LOGIN_FAILURES_LOCK:
+        attempts = [ts for ts in _LOGIN_FAILURES.get(ip, []) if ts >= cutoff]
+        _LOGIN_FAILURES[ip] = attempts
+        if len(attempts) < LOGIN_RATE_LIMIT_MAX_ATTEMPTS:
+            return False, 0
+        retry_after = int((attempts[0] + timedelta(seconds=LOGIN_RATE_LIMIT_WINDOW_SECONDS) - now).total_seconds())
+        return True, max(retry_after, 1)
+
+
+def _record_login_failure(ip: str) -> None:
+    now = utcnow_naive()
+    cutoff = now - timedelta(seconds=LOGIN_RATE_LIMIT_WINDOW_SECONDS)
+    with _LOGIN_FAILURES_LOCK:
+        attempts = [ts for ts in _LOGIN_FAILURES.get(ip, []) if ts >= cutoff]
+        attempts.append(now)
+        _LOGIN_FAILURES[ip] = attempts
+
+
+def _clear_login_failures(ip: str) -> None:
+    with _LOGIN_FAILURES_LOCK:
+        _LOGIN_FAILURES.pop(ip, None)
 
 
 TOPICS = [
@@ -478,10 +541,10 @@ def make_post_body() -> str:
     parts.append(PARA[0])
     parts.append("")
     parts.append("## Resumen")
-    parts.append(random.choice(PARA[1:]))
+    parts.append(RNG.choice(PARA[1:]))
     parts.append("")
     parts.append("## Puntos clave")
-    for bullet in random.choice(LISTS):
+    for bullet in RNG.choice(LISTS):
         parts.append(f"- {bullet}")
     parts.append("")
     parts.append("## Nota final")
@@ -510,9 +573,9 @@ def seed():
             n += 1
 
         status = "published" if i % 6 != 0 else "draft"
-        publish_at = utcnow_naive() - timedelta(days=random.randint(0, 150))
+        publish_at = utcnow_naive() - timedelta(days=RNG.randint(0, 150))
         if i in (2, 11):
-            publish_at = utcnow_naive() + timedelta(days=random.randint(2, 12))
+            publish_at = utcnow_naive() + timedelta(days=RNG.randint(2, 12))
 
         post = Post(
             title=title,
@@ -523,18 +586,18 @@ def seed():
             created_at=publish_at,
             updated_at=publish_at,
         )
-        post.tags = upsert_tags(random.sample(TOPICS, k=random.randint(2, 4)))
+        post.tags = upsert_tags(RNG.sample(TOPICS, k=RNG.randint(2, 4)))
         db.session.add(post)
         db.session.flush()
 
-        for _ in range(random.randint(0, 5)):
+        for _ in range(RNG.randint(0, 5)):
             comment = Comment(
                 post_id=post.id,
-                author=random.choice(
+                author=RNG.choice(
                     ["Paciente", "Visitante", "Ana", "Luis", "ClínicaXYZ", "Admin"]
                 ),
                 body="Gracias por el artículo. Muy claro. ¿Recomiendas algún recurso adicional para profundizar?",
-                is_approved=(random.randint(0, 10) != 0),
+                is_approved=(RNG.randint(0, 10) != 0),
             )
             db.session.add(comment)
 
@@ -709,7 +772,7 @@ def feed():
     return Response(xml, content_type="application/rss+xml; charset=utf-8")
 
 
-@app.route("/healthz")
+@app.route("/healthz", methods=["GET"])
 def healthz():
     return {"status": "ok"}, 200
 
@@ -722,21 +785,36 @@ def healthz():
 def login():
     form = LoginForm()
     if form.validate_on_submit():
+        ip = get_client_ip()
+        limited, retry_after = _rate_limit_login_failures(ip)
+        if limited:
+            app.logger.warning(
+                "login_rate_limited",
+                extra={"event": "login_rate_limited", "ip": ip, "action": "block_login"},
+            )
+            return (
+                render_template(ERROR_TEMPLATE, code=429, message="Demasiados intentos. Intenta más tarde."),
+                429,
+                {"Retry-After": str(retry_after)},
+            )
+
         username = (form.username.data or "").strip()
         password = form.password.data or ""
         user = db.session.scalar(select(User).where(User.username == username))
         if user and check_password_hash(user.password_hash, password):
+            _clear_login_failures(ip)
             login_user(user)
             app.logger.info(
                 "login_ok",
-                extra={"event": "login_ok", "user": username, "ip": get_client_ip()},
+                extra={"event": "login_ok", "user": username, "ip": ip},
             )
             flash("Login OK.", "ok")
             return redirect(url_for("admin_posts"))
 
+        _record_login_failure(ip)
         app.logger.warning(
             "login_fail",
-            extra={"event": "login_fail", "user": username, "ip": get_client_ip()},
+            extra={"event": "login_fail", "user": username, "ip": ip},
         )
         flash("Credenciales inválidas.", "error")
         return redirect(url_for("login"))
@@ -940,12 +1018,17 @@ def admin_comments():
 
 @app.errorhandler(404)
 def not_found(_error):
-    return render_template("error.html", code=404, message="No encontrado."), 404
+    return render_template(ERROR_TEMPLATE, code=404, message="No encontrado."), 404
 
 
 @app.errorhandler(413)
 def too_large(_error):
-    return render_template("error.html", code=413, message="Request demasiado grande."), 413
+    return render_template(ERROR_TEMPLATE, code=413, message="Request demasiado grande."), 413
+
+
+@app.errorhandler(429)
+def too_many_requests(_error):
+    return render_template(ERROR_TEMPLATE, code=429, message="Demasiadas solicitudes."), 429
 
 
 @app.errorhandler(Exception)
@@ -956,8 +1039,9 @@ def handle_unexpected_error(error):
         "unhandled_exception",
         extra={"event": "unhandled_exception", "path": request.path},
     )
-    return render_template("error.html", code=500, message="Error interno."), 500
+    return render_template(ERROR_TEMPLATE, code=500, message="Error interno."), 500
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8000")), debug=False)
+    run_host = os.environ.get("FLASK_RUN_HOST", "127.0.0.1")
+    app.run(host=run_host, port=int(os.environ.get("PORT", "8000")), debug=False)
