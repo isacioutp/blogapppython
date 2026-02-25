@@ -22,6 +22,10 @@ services:
         value: ${FLASK_SECRET_KEY}
         scope: RUN_TIME
         type: SECRET
+      - key: ADMIN_PASSWORD
+        value: ${ADMIN_PASSWORD}
+        scope: RUN_TIME
+        type: SECRET
     log_destinations:
       - name: logtail
         logtail:

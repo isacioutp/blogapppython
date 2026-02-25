@@ -19,6 +19,7 @@ jobs:
           LOGTAIL_TOKEN: ${{ secrets.LOGTAIL_TOKEN }}
           ALERT_SIMULATION_TOKEN: ${{ secrets.ALERT_SIMULATION_TOKEN }}
           FLASK_SECRET_KEY: ${{ secrets.FLASK_SECRET_KEY }}
+          ADMIN_PASSWORD: ${{ secrets.ADMIN_PASSWORD }}
         run: envsubst < .do/app.yaml > .do/app.rendered.yaml
 
       - name: Deploy the app
