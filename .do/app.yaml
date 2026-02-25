@@ -26,6 +26,9 @@ services:
         value: ${ADMIN_PASSWORD}
         scope: RUN_TIME
         type: SECRET
+      - key: TRUSTED_HOSTS
+        value: ".ondigitalocean.app,localhost,127.0.0.1,[::1]"
+        scope: RUN_TIME
     log_destinations:
       - name: logtail
         logtail:
