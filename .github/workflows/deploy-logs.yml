@@ -17,6 +17,8 @@ jobs:
       - name: Render app spec with GitHub secret
         env:
           LOGTAIL_TOKEN: ${{ secrets.LOGTAIL_TOKEN }}
+          ALERT_SIMULATION_TOKEN: ${{ secrets.ALERT_SIMULATION_TOKEN }}
+          FLASK_SECRET_KEY: ${{ secrets.FLASK_SECRET_KEY }}
         run: envsubst < .do/app.yaml > .do/app.rendered.yaml
 
       - name: Deploy the app
