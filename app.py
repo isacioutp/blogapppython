@@ -3,6 +3,7 @@ import logging
 import os
 import secrets
 import sys
+import threading
 
 RNG = secrets.SystemRandom()
 from datetime import UTC, datetime, timedelta
@@ -87,6 +88,13 @@ def parse_page_arg() -> int:
     return max(page, 1)
 
 
+def parse_trusted_hosts(raw: str | None) -> list[str]:
+    if not raw:
+        return ["localhost", "127.0.0.1", "[::1]"]
+    hosts = [h.strip() for h in raw.split(",") if h.strip()]
+    return hosts or ["localhost", "127.0.0.1", "[::1]"]
+
+
 # -----------------------------------------------------------------------------
 # App / Extensions setup
 # -----------------------------------------------------------------------------
@@ -132,15 +140,20 @@ def _load_app_signing_key() -> str:
     )
     for env_name in env_names:
         candidate = os.environ.get(env_name)
-        if candidate:
+        if candidate and len(candidate) >= 32:
             return candidate
 
-    generated = secrets.token_urlsafe(32)
-    app.logger.warning(
-        "missing_app_secret_generated",
-        extra={"event": "config_warning", "action": "generated_ephemeral_secret"},
+    if as_bool(os.environ.get("ALLOW_INSECURE_DEV_DEFAULTS"), default=False):
+        generated = secrets.token_urlsafe(32)
+        app.logger.warning(
+            "missing_app_secret_generated",
+            extra={"event": "config_warning", "action": "generated_ephemeral_secret"},
+        )
+        return generated
+
+    raise RuntimeError(
+        "SECRET_KEY/FLASK_SECRET_KEY missing or too short. Set at least 32 chars."
     )
-    return generated
 
 
 app_secret = _load_app_signing_key()
@@ -154,16 +167,15 @@ app.config.update(
     MAX_CONTENT_LENGTH=1 * 1024 * 1024,  # 1MB
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=as_bool(os.environ.get("SESSION_COOKIE_SECURE"), default=False),
+    SESSION_COOKIE_SECURE=as_bool(os.environ.get("SESSION_COOKIE_SECURE"), default=True),
     REMEMBER_COOKIE_HTTPONLY=True,
     REMEMBER_COOKIE_SAMESITE="Lax",
-    REMEMBER_COOKIE_SECURE=as_bool(os.environ.get("SESSION_COOKIE_SECURE"), default=False),
+    REMEMBER_COOKIE_SECURE=as_bool(os.environ.get("SESSION_COOKIE_SECURE"), default=True),
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
     WTF_CSRF_TIME_LIMIT=60 * 60 * 4,
 )
 
-trusted_hosts = [h.strip() for h in os.environ.get("TRUSTED_HOSTS", "").split(",") if h.strip()]
-if trusted_hosts:
-    app.config["TRUSTED_HOSTS"] = trusted_hosts
+app.config["TRUSTED_HOSTS"] = parse_trusted_hosts(os.environ.get("TRUSTED_HOSTS"))
 
 # Flask-SQLAlchemy / Flask-Login / CSRF
 
@@ -171,7 +183,13 @@ db = SQLAlchemy(app)
 login_manager = LoginManager(app)
 login_manager.login_view = "login"
 login_manager.login_message_category = "error"
+login_manager.session_protection = "strong"
 csrf = CSRFProtect(app)
+
+LOGIN_RATE_LIMIT_WINDOW_SECONDS = int(os.environ.get("LOGIN_RATE_LIMIT_WINDOW_SECONDS", "900"))
+LOGIN_RATE_LIMIT_MAX_ATTEMPTS = int(os.environ.get("LOGIN_RATE_LIMIT_MAX_ATTEMPTS", "5"))
+_LOGIN_FAILURES: dict[str, list[datetime]] = {}
+_LOGIN_FAILURES_LOCK = threading.Lock()
 
 
 # -----------------------------------------------------------------------------
@@ -248,6 +266,7 @@ MAX_COMMENT_LEN = 1000
 MAX_TITLE_LEN = 180
 MAX_SLUG_LEN = 220
 MAX_POST_LEN = 30_000
+ERROR_TEMPLATE = "error.html"
 
 
 # -----------------------------------------------------------------------------
@@ -365,9 +384,11 @@ def add_headers_and_log(response):
     response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
     response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
     response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+    response.headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+    response.headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
     response.headers.setdefault(
         "Content-Security-Policy",
-        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'",
+        "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'self'; form-action 'self'",
     )
     if request.is_secure:
         response.headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
@@ -413,7 +434,11 @@ def initdb():
         print("Admin user already exists.")
         return
 
-    admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
+    admin_password = (os.environ.get("ADMIN_PASSWORD") or "").strip()
+    if len(admin_password) < 12:
+        raise RuntimeError(
+            "ADMIN_PASSWORD is required and must be at least 12 characters for initdb."
+        )
     admin_user = User(
         username="admin",
         password_hash=generate_password_hash(admin_password),
@@ -422,7 +447,33 @@ def initdb():
     db.session.commit()
 
     print("Created admin user: admin")
-    print("Password source: ADMIN_PASSWORD env (or default if not provided).")
+    print("Password source: ADMIN_PASSWORD env.")
+
+
+def _rate_limit_login_failures(ip: str) -> tuple[bool, int]:
+    now = utcnow_naive()
+    cutoff = now - timedelta(seconds=LOGIN_RATE_LIMIT_WINDOW_SECONDS)
+    with _LOGIN_FAILURES_LOCK:
+        attempts = [ts for ts in _LOGIN_FAILURES.get(ip, []) if ts >= cutoff]
+        _LOGIN_FAILURES[ip] = attempts
+        if len(attempts) < LOGIN_RATE_LIMIT_MAX_ATTEMPTS:
+            return False, 0
+        retry_after = int((attempts[0] + timedelta(seconds=LOGIN_RATE_LIMIT_WINDOW_SECONDS) - now).total_seconds())
+        return True, max(retry_after, 1)
+
+
+def _record_login_failure(ip: str) -> None:
+    now = utcnow_naive()
+    cutoff = now - timedelta(seconds=LOGIN_RATE_LIMIT_WINDOW_SECONDS)
+    with _LOGIN_FAILURES_LOCK:
+        attempts = [ts for ts in _LOGIN_FAILURES.get(ip, []) if ts >= cutoff]
+        attempts.append(now)
+        _LOGIN_FAILURES[ip] = attempts
+
+
+def _clear_login_failures(ip: str) -> None:
+    with _LOGIN_FAILURES_LOCK:
+        _LOGIN_FAILURES.pop(ip, None)
 
 
 TOPICS = [
@@ -535,448 +586,4 @@ def seed():
             created_at=publish_at,
             updated_at=publish_at,
         )
-        post.tags = upsert_tags(RNG.sample(TOPICS, k=RNG.randint(2, 4)))
-        db.session.add(post)
-        db.session.flush()
-
-        for _ in range(RNG.randint(0, 5)):
-            comment = Comment(
-                post_id=post.id,
-                author=RNG.choice(
-                    ["Paciente", "Visitante", "Ana", "Luis", "ClínicaXYZ", "Admin"]
-                ),
-                body="Gracias por el artículo. Muy claro. ¿Recomiendas algún recurso adicional para profundizar?",
-                is_approved=(RNG.randint(0, 10) != 0),
-            )
-            db.session.add(comment)
-
-    db.session.commit()
-    print("Seeded medical posts, tags and comments.")
-
-
-# -----------------------------------------------------------------------------
-# Routes (public)
-# -----------------------------------------------------------------------------
-
-@app.route("/")
-def index():
-    page = parse_page_arg()
-    posts, page, pages, total = paginate_posts(visible_posts_stmt(), page=page, per_page=8)
-
-    return render_template(
-        "index.html",
-        posts=posts,
-        page=page,
-        pages=pages,
-        total=total,
-        **get_sidebar_context(),
-    )
-
-
-@app.route("/p/<slug>", methods=["GET", "POST"])
-def post_view(slug: str):
-    post = db.session.scalar(visible_posts_stmt().where(Post.slug == slug))
-    if post is None:
-        abort(404)
-
-    # Lightweight counter update.
-    post.views = (post.views or 0) + 1
-    db.session.commit()
-
-    form = CommentForm()
-    if form.validate_on_submit():
-        author = (form.author.data or "").strip()
-        body = (form.body.data or "").strip()
-
-        if len(author) > MAX_AUTHOR_LEN:
-            flash("Nombre demasiado largo.", "error")
-            return redirect(url_for("post_view", slug=slug))
-        if len(body) > MAX_COMMENT_LEN:
-            flash("Comentario demasiado largo.", "error")
-            return redirect(url_for("post_view", slug=slug))
-
-        db.session.add(Comment(post_id=post.id, author=author, body=body, is_approved=True))
-        db.session.commit()
-        flash("Comentario enviado (puede pasar a moderación).", "ok")
-        return redirect(url_for("post_view", slug=slug))
-
-    comments = db.session.scalars(
-        select(Comment)
-        .where(Comment.post_id == post.id)
-        .where(Comment.is_approved.is_(True))
-        .order_by(Comment.created_at.asc())
-    ).all()
-
-    return render_template(
-        "post.html",
-        post=post,
-        comments=comments,
-        form=form,
-        **get_sidebar_context(),
-    )
-
-
-@app.route("/tag/<name>")
-def tag_view(name: str):
-    page = parse_page_arg()
-    tag = db.session.scalar(select(Tag).where(Tag.name == name.lower()))
-    if tag is None:
-        abort(404)
-
-    stmt = visible_posts_stmt().join(Post.tags).where(Tag.id == tag.id)
-    posts, page, pages, total = paginate_posts(stmt, page=page, per_page=8)
-
-    return render_template(
-        "tag.html",
-        tag=tag,
-        posts=posts,
-        page=page,
-        pages=pages,
-        total=total,
-        **get_sidebar_context(),
-    )
-
-
-@app.route("/search")
-def search():
-    qstr = (request.args.get("q") or "").strip()
-    page = parse_page_arg()
-
-    stmt = visible_posts_stmt()
-    if qstr:
-        like = f"%{qstr}%"
-        stmt = stmt.where(or_(Post.title.ilike(like), Post.content.ilike(like)))
-
-    posts, page, pages, total = paginate_posts(stmt, page=page, per_page=8)
-
-    return render_template(
-        "search.html",
-        q=qstr,
-        posts=posts,
-        page=page,
-        pages=pages,
-        total=total,
-        **get_sidebar_context(),
-    )
-
-
-@app.route("/archive/<int:year>/<int:month>")
-def archive(year: int, month: int):
-    if month < 1 or month > 12:
-        abort(404)
-
-    page = parse_page_arg()
-    start = datetime(year, month, 1)
-    end = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
-
-    stmt = visible_posts_stmt().where(Post.publish_at >= start).where(Post.publish_at < end)
-    posts, page, pages, total = paginate_posts(stmt, page=page, per_page=8)
-
-    return render_template(
-        "archive.html",
-        year=year,
-        month=month,
-        posts=posts,
-        page=page,
-        pages=pages,
-        total=total,
-        **get_sidebar_context(),
-    )
-
-
-@app.route("/feed.xml")
-def feed():
-    posts = db.session.scalars(visible_posts_stmt().order_by(Post.publish_at.desc()).limit(20)).all()
-    site = request.host_url.rstrip("/")
-
-    def esc(value: str | None) -> str:
-        return (value or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-
-    items: list[str] = []
-    for post in posts:
-        link = f"{site}{url_for('post_view', slug=post.slug)}"
-        items.append(
-            f"""
-        <item>
-          <title>{esc(post.title)}</title>
-          <link>{esc(link)}</link>
-          <guid>{esc(link)}</guid>
-          <pubDate>{post.publish_at.strftime('%a, %d %b %Y %H:%M:%S +0000')}</pubDate>
-          <description>{esc(excerpt(post.content, 400))}</description>
-        </item>
-        """.strip()
-        )
-
-    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<rss version="2.0">
-  <channel>
-    <title>Blog Médico - Demo</title>
-    <link>{esc(site + url_for('index'))}</link>
-    <description>Contenido educativo. No sustituye consulta médica.</description>
-    <language>es</language>
-    {''.join(items)}
-  </channel>
-</rss>
-"""
-    return Response(xml, content_type="application/rss+xml; charset=utf-8")
-
-
-@app.route("/healthz", methods=["GET"])
-def healthz():
-    return {"status": "ok"}, 200
-
-
-# -----------------------------------------------------------------------------
-# Auth / admin routes
-# -----------------------------------------------------------------------------
-
-@app.route("/login", methods=["GET", "POST"])
-def login():
-    form = LoginForm()
-    if form.validate_on_submit():
-        username = (form.username.data or "").strip()
-        password = form.password.data or ""
-        user = db.session.scalar(select(User).where(User.username == username))
-        if user and check_password_hash(user.password_hash, password):
-            login_user(user)
-            app.logger.info(
-                "login_ok",
-                extra={"event": "login_ok", "user": username, "ip": get_client_ip()},
-            )
-            flash("Login OK.", "ok")
-            return redirect(url_for("admin_posts"))
-
-        app.logger.warning(
-            "login_fail",
-            extra={"event": "login_fail", "user": username, "ip": get_client_ip()},
-        )
-        flash("Credenciales inválidas.", "error")
-        return redirect(url_for("login"))
-
-    return render_template("login.html", form=form)
-
-
-@app.route("/logout", methods=["POST"])
-@login_required
-def logout():
-    username = getattr(current_user, "username", "unknown")
-    logout_user()
-    app.logger.info("logout", extra={"event": "logout", "user": username})
-    flash("Sesión cerrada.", "ok")
-    return redirect(url_for("index"))
-
-
-@app.route("/admin")
-@login_required
-def admin_posts():
-    posts = db.session.scalars(
-        select(Post).where(Post.is_deleted.is_(False)).order_by(Post.created_at.desc())
-    ).all()
-    pending = db.session.scalar(
-        select(func.count()).select_from(Comment).where(Comment.is_approved.is_(False))
-    ) or 0
-    return render_template("admin_posts.html", posts=posts, pending=pending)
-
-
-@app.route("/admin/new", methods=["GET", "POST"])
-@login_required
-def admin_new_post():
-    form = PostForm()
-    if form.validate_on_submit():
-        title = (form.title.data or "").strip()
-        slug = simple_slugify(form.slug.data or title)
-        content = (form.content.data or "").strip()
-        status = form.status.data
-        publish_at = form.publish_at.data or utcnow_naive()
-        tag_names = parse_tags(form.tags.data)
-
-        if len(title) > MAX_TITLE_LEN or len(slug) > MAX_SLUG_LEN or len(content) > MAX_POST_LEN:
-            flash("Campos demasiado largos.", "error")
-            return redirect(url_for("admin_new_post"))
-
-        base_slug = slug
-        i = 2
-        while db.session.scalar(select(Post).where(Post.slug == slug)):
-            slug = f"{base_slug}-{i}"
-            i += 1
-
-        post = Post(
-            title=title,
-            slug=slug,
-            content=content,
-            status=status,
-            publish_at=publish_at,
-            created_at=utcnow_naive(),
-            updated_at=utcnow_naive(),
-        )
-        post.tags = upsert_tags(tag_names)
-        db.session.add(post)
-        db.session.commit()
-        app.logger.info(
-            "post_create",
-            extra={"event": "post_create", "user": current_user.username, "slug": post.slug},
-        )
-        flash("Post creado.", "ok")
-        return redirect(url_for("admin_posts"))
-
-    return render_template("admin_edit.html", mode="new", form=form)
-
-
-@app.route("/admin/edit/<int:post_id>", methods=["GET", "POST"])
-@login_required
-def admin_edit_post(post_id: int):
-    post = db.get_or_404(Post, post_id)
-    form = PostForm(obj=post)
-
-    if request.method == "GET":
-        form.slug.data = post.slug
-        form.tags.data = ", ".join(tag.name for tag in post.tags)
-        form.status.data = post.status
-        form.publish_at.data = post.publish_at
-
-    if form.validate_on_submit():
-        title = (form.title.data or "").strip()
-        slug = simple_slugify(form.slug.data or title)
-        content = (form.content.data or "").strip()
-        status = form.status.data
-        publish_at = form.publish_at.data or utcnow_naive()
-        tag_names = parse_tags(form.tags.data)
-
-        if len(title) > MAX_TITLE_LEN or len(slug) > MAX_SLUG_LEN or len(content) > MAX_POST_LEN:
-            flash("Campos demasiado largos.", "error")
-            return redirect(url_for("admin_edit_post", post_id=post.id))
-
-        existing = db.session.scalar(select(Post).where(Post.slug == slug))
-        if existing and existing.id != post.id:
-            flash("Ese slug ya existe.", "error")
-            return redirect(url_for("admin_edit_post", post_id=post.id))
-
-        post.title = title
-        post.slug = slug
-        post.content = content
-        post.status = status
-        post.publish_at = publish_at
-        post.updated_at = utcnow_naive()
-        post.tags = upsert_tags(tag_names)
-        db.session.commit()
-        app.logger.info(
-            "post_edit",
-            extra={
-                "event": "post_edit",
-                "user": current_user.username,
-                "post_id": post.id,
-                "slug": post.slug,
-            },
-        )
-        flash("Post actualizado.", "ok")
-        return redirect(url_for("admin_posts"))
-
-    return render_template("admin_edit.html", mode="edit", form=form)
-
-
-@app.route("/admin/delete/<int:post_id>", methods=["POST"])
-@login_required
-def admin_delete_post(post_id: int):
-    post = db.get_or_404(Post, post_id)
-    post.is_deleted = True
-    post.updated_at = utcnow_naive()
-    db.session.commit()
-    app.logger.warning(
-        "post_delete_soft",
-        extra={
-            "event": "post_delete_soft",
-            "user": current_user.username,
-            "post_id": post.id,
-            "slug": post.slug,
-        },
-    )
-    flash("Post eliminado (soft delete).", "ok")
-    return redirect(url_for("admin_posts"))
-
-
-@app.route("/admin/comments", methods=["GET", "POST"])
-@login_required
-def admin_comments():
-    form = ModerateCommentForm()
-    if form.validate_on_submit():
-        try:
-            comment_id = int(form.comment_id.data)
-        except (TypeError, ValueError):
-            flash("Comentario inválido.", "error")
-            return redirect(url_for("admin_comments"))
-
-        action = (form.action.data or "").strip().lower()
-        if action not in {"approve", "reject", "delete"}:
-            flash("Acción inválida.", "error")
-            return redirect(url_for("admin_comments"))
-
-        comment = db.get_or_404(Comment, comment_id)
-        if action == "approve":
-            comment.is_approved = True
-        elif action == "reject":
-            comment.is_approved = False
-        else:
-            db.session.delete(comment)
-
-        db.session.commit()
-        app.logger.info(
-            "comment_moderation",
-            extra={
-                "event": "comment_moderation",
-                "user": current_user.username,
-                "action": action,
-                "comment_id": comment_id,
-            },
-        )
-        flash("Moderación aplicada.", "ok")
-        return redirect(url_for("admin_comments"))
-
-    pending = db.session.scalars(
-        select(Comment)
-        .where(Comment.is_approved.is_(False))
-        .order_by(Comment.created_at.desc())
-        .limit(200)
-    ).all()
-    recent = db.session.scalars(
-        select(Comment)
-        .where(Comment.is_approved.is_(True))
-        .order_by(Comment.created_at.desc())
-        .limit(50)
-    ).all()
-    return render_template("admin_comments.html", pending=pending, recent=recent, form=form)
-
-
-# -----------------------------------------------------------------------------
-# Error handlers
-# -----------------------------------------------------------------------------
-
-@app.errorhandler(404)
-def not_found(_error):
-    return render_template("error.html", code=404, message="No encontrado."), 404
-
-
-@app.errorhandler(413)
-def too_large(_error):
-    return render_template("error.html", code=413, message="Request demasiado grande."), 413
-
-@app.route("/test-error-500")
-def test_error_500():
-    # This triggers a ZeroDivisionError
-    app.logger.info("Triggering an intentional 500 error for Better Stack test.")
-    result = 1 / 0
-    return "This will never be seen"
-
-@app.errorhandler(Exception)
-def handle_unexpected_error(error):
-    if isinstance(error, HTTPException):
-        return error
-    app.logger.exception(
-        "unhandled_exception",
-        extra={"event": "unhandled_exception", "path": request.path},
-    )
-    return render_template("error.html", code=500, message="Error interno."), 500
-
-
-if __name__ == "__main__":
-    run_host = os.environ.get("FLASK_RUN_HOST", "127.0.0.1")
-    app.run(host=run_host, port=int(os.environ.get("PORT", "8000")), debug=False)
+        post.tags = upsert_
