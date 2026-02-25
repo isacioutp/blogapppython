@@ -36,10 +36,10 @@
         <h3 style="margin-top:0">Deja un comentario</h3>
         <form method="post">
           {{ form.csrf_token }}
-          <label>Nombre</label>
+          <label for="{{ form.author.id }}">Nombre</label>
           {{ form.author() }}
           <div style="height:10px"></div>
-          <label>Comentario</label>
+          <label for="{{ form.body.id }}">Comentario</label>
           {{ form.body() }}
           <div style="height:10px"></div>
           <button class="btn" type="submit">Enviar</button>

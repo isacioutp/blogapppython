@@ -1,7 +1,8 @@
 <aside class="card">
   <h3 style="margin-top:0">Buscar</h3>
   <form method="get" action="{{ url_for('search') }}">
-    <input type="text" name="q" placeholder="Buscar..." value="{{ request.args.get('q','') }}">
+    <label for="sidebar-search-q">Término de búsqueda</label>
+    <input id="sidebar-search-q" type="text" name="q" placeholder="Buscar..." value="{{ request.args.get('q','') }}">
     <div style="height:10px"></div>
     <button class="btn" type="submit">Buscar</button>
   </form>

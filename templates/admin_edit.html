@@ -9,27 +9,27 @@
     <form method="post">
       {{ form.csrf_token }}
 
-      <label>Título</label>
+      <label for="{{ form.title.id }}">Título</label>
       {{ form.title() }}
       <div style="height:10px"></div>
 
-      <label>Slug (opcional)</label>
+      <label for="{{ form.slug.id }}">Slug (opcional)</label>
       {{ form.slug() }}
       <div style="height:10px"></div>
 
-      <label>Tags (coma-separados)</label>
+      <label for="{{ form.tags.id }}">Tags (coma-separados)</label>
       {{ form.tags() }}
       <div style="height:10px"></div>
 
-      <label>Estado</label>
+      <label for="{{ form.status.id }}">Estado</label>
       {{ form.status() }}
       <div style="height:10px"></div>
 
-      <label>Publicar en (UTC) - opcional</label>
+      <label for="{{ form.publish_at.id }}">Publicar en (UTC) - opcional</label>
       {{ form.publish_at(placeholder="2026-02-12 20:30:00") }}
       <div style="height:10px"></div>
 
-      <label>Contenido</label>
+      <label for="{{ form.content.id }}">Contenido</label>
       {{ form.content() }}
 
       <div style="height:12px"></div>

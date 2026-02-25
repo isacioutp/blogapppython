@@ -7,10 +7,10 @@
     <div style="height:10px"></div>
     <form method="post">
       {{ form.csrf_token }}
-      <label>Usuario</label>
+      <label for="{{ form.username.id }}">Usuario</label>
       {{ form.username(value="admin") }}
       <div style="height:10px"></div>
-      <label>Contraseña</label>
+      <label for="{{ form.password.id }}">Contraseña</label>
       {{ form.password(placeholder="Ingresa tu contraseña") }}
       <div style="height:10px"></div>
       <button class="btn" type="submit">Entrar</button>

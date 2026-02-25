@@ -8,7 +8,8 @@
         <div class="meta">Búsqueda simple tipo “vintage” (SQL LIKE) con paginación.</div>
         <div style="height:10px"></div>
         <form method="get" action="{{ url_for('search') }}">
-          <input type="text" name="q" value="{{ q }}" placeholder="Ej: sueño, nutrición, diabetes...">
+          <label for="search-q">Término de búsqueda</label>
+          <input id="search-q" type="text" name="q" value="{{ q }}" placeholder="Ej: sueño, nutrición, diabetes...">
           <div style="height:10px"></div>
           <button class="btn" type="submit">Buscar</button>
         </form>
