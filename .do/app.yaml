@@ -18,6 +18,10 @@ services:
         value: ${ALERT_SIMULATION_TOKEN}
         scope: RUN_TIME
         type: SECRET
+      - key: FLASK_SECRET_KEY
+        value: ${FLASK_SECRET_KEY}
+        scope: RUN_TIME
+        type: SECRET
     log_destinations:
       - name: logtail
         logtail:
