@@ -2,7 +2,7 @@ name: deploy App
 
 on:
   push:
-    branches: [master]
+    branches: [logging-test]
 
 permissions:
   contents: read
