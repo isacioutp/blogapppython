@@ -1030,6 +1030,12 @@ def too_large(_error):
 def too_many_requests(_error):
     return render_template(ERROR_TEMPLATE, code=429, message="Demasiadas solicitudes."), 429
 
+@app.route("/test-error-500", methods=["GET"])
+def test_error_500():
+    # This triggers a ZeroDivisionError
+    app.logger.info("Triggering an intentional 500 error for Better Stack test.")
+    result = 1 / 0
+    return "This will never be seen"
 
 @app.errorhandler(Exception)
 def handle_unexpected_error(error):
