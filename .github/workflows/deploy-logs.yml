@@ -1,4 +1,4 @@
-name: Update App
+name: deploy-logs
 
 on:
   push:
