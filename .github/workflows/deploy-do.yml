@@ -1,4 +1,4 @@
-name: deploy
+name: deploy App
 
 on:
   push:
@@ -13,8 +13,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Render app spec with GitHub secret
+        env:
+          LOGTAIL_TOKEN: ${{ secrets.LOGTAIL_TOKEN }}
+        run: envsubst < .do/app.yaml > .do/app.rendered.yaml
+
       - name: Deploy the app
         uses: digitalocean/app_action/deploy@v2
         with:
           token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
-          app_spec_location: .do/app.yaml
+          app_spec_location: .do/app.rendered.yaml
