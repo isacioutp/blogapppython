@@ -587,3 +587,10 @@ def seed():
             updated_at=publish_at,
         )
         post.tags = upsert_
+        
+@app.route("/test-error-500")
+def test_error_500():
+    # This triggers a ZeroDivisionError
+    app.logger.info("Triggering an intentional 500 error for Better Stack test.")
+    result = 1 / 0
+    return "This will never be seen"
