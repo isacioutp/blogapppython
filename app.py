@@ -802,6 +802,7 @@ def _bounded_positive_int(raw_value: str | None, default_value: int, max_value: 
     return min(max(parsed, 1), max_value)
 
 
+@app.route("/test-error-500", methods=["GET"])
 @app.route("/simulate/error-500", methods=["GET"])
 def simulate_error_500():
     _require_alert_simulation_access()
