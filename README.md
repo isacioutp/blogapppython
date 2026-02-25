@@ -1,6 +1,6 @@
 # Blog Médico (Demo) — Flask + Docker
 Demo server-rendered con Flask, SQLite, templates, RSS y panel admin clásico.
-
+test
 ## Estado de seguridad (actualizado: 2026-02-24)
 Estado actual: **baseline robusto para despliegue inicial** con hardening aplicado.
 
