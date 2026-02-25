@@ -23,6 +23,13 @@ Demo server-rendered con Flask, SQLite, RSS y panel admin clasico.
 - Gunicorn
 - SQLite (por defecto)
 
+## Resumen de seguridad
+
+- Nivel actual: baseline robusto para despliegue inicial.
+- Controles activos: CSRF, cookies seguras, `SECRET_KEY` obligatorio, password admin minimo, `TRUSTED_HOSTS`, rate limit de login, CSP para scripts y validaciones de formularios.
+- Riesgos principales pendientes: rate limiting no distribuido entre replicas, uso de `style-src 'unsafe-inline'`, y falta de pipeline automatizado completo (SAST/SCA/DAST).
+- Recomendacion operativa: mantener secretos fuertes por entorno, monitorear logs estructurados y ejecutar escaneo de seguridad en CI antes de cada release.
+
 ## Estado de seguridad (actualizado: 2026-02-25)
 
 Estado actual: baseline robusto para despliegue inicial.
