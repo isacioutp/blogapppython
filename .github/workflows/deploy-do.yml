@@ -2,7 +2,7 @@ name: Update App
 
 on:
   push:
-    branches: [deploy-do]
+    branches: [master]
 
 permissions:
   contents: read
