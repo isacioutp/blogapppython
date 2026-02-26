@@ -1,7 +1,7 @@
 # Blog Médico (Demo) - Flask + Docker
 
 Demo server-rendered con Flask, SQLite, RSS y panel admin clasico.
-
+##
 ## Funcionalidades
 
 - Publicacion de posts con estados `draft` y `published`.
