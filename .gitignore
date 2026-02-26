@@ -1,1 +1,48 @@
-scripsalert.sh
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment / local secrets
+.env
+.env.*
+!.env.example
+
+# Test / coverage / type-check caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Logs
+*.log
+
+# Local databases and runtime data
+*.sqlite
+*.sqlite3
+*.db
+data/
+instance/
+
+# IDE / OS files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
